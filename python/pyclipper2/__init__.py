@@ -85,7 +85,7 @@ class PointInPolygonResult(IntEnum):
     IS_OUTSIDE = 2
 
 
-@dataclass
+@dataclass(slots=True)
 class Point64:
     x: int
     y: int
@@ -93,15 +93,13 @@ class Point64:
     def __post_init__(self):
         self.x, self.y = _int64_coordinate(self.x), _int64_coordinate(self.y)
 
-
-@dataclass
+@dataclass(slots=True)
 class PointD:
     x: float
     y: float
 
     def __post_init__(self):
         self.x, self.y = float(self.x), float(self.y)
-
 
 @dataclass
 class Rect64:
@@ -143,9 +141,13 @@ def _xy(path: Sequence) -> np.ndarray:
                     raise OverflowError("integer coordinates outside +/-2**53 are not supported by the float64 kernel")
             xy = f64(path).reshape(-1, 2)
         else:
-            values = (_ffi_coordinate(coordinate) for point in path for coordinate in
-                      ((point.x, point.y) if hasattr(point, "x") else point))
-            xy = np.fromiter(values, dtype=np.float64, count=2 * len(path)).reshape(-1, 2)
+            if path and isinstance(path[0], (Point64, PointD)):
+                values = (coordinate for point in path for coordinate in (point.x, point.y))
+                xy = np.fromiter(values, dtype=np.float64, count=2 * len(path)).reshape(-1, 2)
+            else:
+                values = (_ffi_coordinate(coordinate) for point in path for coordinate in
+                          ((point.x, point.y) if hasattr(point, "x") else point))
+                xy = np.fromiter(values, dtype=np.float64, count=2 * len(path)).reshape(-1, 2)
         if not np.isfinite(xy).all():
             raise ValueError("path coordinates must be finite")
         return xy
@@ -156,7 +158,7 @@ def _xy(path: Sequence) -> np.ndarray:
 def _path(xy: np.ndarray, integer: bool) -> list[Point64] | list[PointD]:
     if integer:
         return [Point64(int(round(x)), int(round(y))) for x, y in xy]
-    return [PointD(float(x), float(y)) for x, y in xy]
+    return [PointD(x, y) for x, y in xy]
 
 
 def make_path(points) -> list[Point64]:
@@ -185,18 +187,7 @@ def point_in_polygon(pt, polygon) -> PointInPolygonResult:
 
 
 def _convex(xy: np.ndarray) -> bool:
-    if len(xy) < 3:
-        return False
-    direction = 0.0
-    for i in range(len(xy)):
-        a, b, c = xy[i - 1], xy[i], xy[(i + 1) % len(xy)]
-        u, v = b - a, c - b
-        cross = float(u[0] * v[1] - u[1] * v[0])
-        if abs(cross) > 1e-12:
-            if direction and cross * direction < 0:
-                return False
-            direction = cross
-    return bool(direction)
+    return bool(len(xy) >= 3 and lib().mpc_is_convex(addr(xy), len(xy)))
 
 
 def _convex_intersection(subject, clip):
@@ -315,7 +306,7 @@ def xor_(subjects, clips, fill_rule: FillRule = FillRule.NON_ZERO):
 
 
 def _outward_normals(xy: np.ndarray):
-    sign = 1.0 if area([PointD(*p) for p in xy]) >= 0 else -1.0
+    sign = 1.0 if area(xy) >= 0 else -1.0
     normals = []
     for a, b in zip(xy, np.roll(xy, -1, axis=0)):
         edge = b - a
@@ -345,7 +336,7 @@ def _inflate_convex(path, delta, jt, arc_tolerance, miter_limit):
     if jt == JoinType.ROUND:
         out = []
         step = max(0.05, 0.25 if not arc_tolerance else min(0.5, abs(float(arc_tolerance) / max(abs(delta), 1e-12))))
-        winding = area([PointD(*p) for p in xy])
+        winding = area(xy)
         for i, point in enumerate(xy):
             start, end = atan2(normals[i - 1][1], normals[i - 1][0]), atan2(normals[i][1], normals[i][0])
             if winding >= 0:

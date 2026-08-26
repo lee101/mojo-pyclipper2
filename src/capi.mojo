@@ -1,9 +1,13 @@
 """C ABI for the convex polygon kernels used by the Python compatibility API."""
 
-from std.math import sqrt
+from max.algorithm import parallelize
+from std.math import nan, sqrt
 from std.sys import simd_width_of
+from std.sys.info import num_physical_cores
 
 comptime Ptr = UnsafePointer[Float64, AnyOrigin[mut=True]]
+comptime NAN = nan[DType.float64]()
+comptime OFFSET_PARALLEL_MIN = 32768
 
 
 def signed_area(xy: Ptr, n: Int) -> Float64:
@@ -51,8 +55,38 @@ def mpc_point_in_polygon(px: Float64, py: Float64, xy: Int, n: Int) abi("C") -> 
     if n < 3 or xy == 0:
         return 0
     var p = Ptr(unsafe_from_address=xy)
-    var inside = False
-    for i in range(n):
+    comptime W = simd_width_of[DType.float64]()
+    comptime C = W // 2
+    var crossings = 0
+    var i = 0
+    while i + C < n:
+        var current = p.load[width=W, alignment=1](2 * i).deinterleave()
+        var following = p.load[width=W, alignment=1](2 * i + 2).deinterleave()
+        var ax = current[0]
+        var ay = current[1]
+        var bx = following[0]
+        var by = following[1]
+        var query_x = ax * 0.0 + px
+        var query_y = ay * 0.0 + py
+        var cross = (px - ax) * (by - ay) - (py - ay) * (bx - ax)
+        var on_segment = (
+            abs(cross).lt(1e-12)
+            & query_x.ge(min(ax, bx))
+            & query_x.le(max(ax, bx))
+            & query_y.ge(min(ay, by))
+            & query_y.le(max(ay, by))
+        )
+        if on_segment.reduce_or():
+            return -1
+        var hits = ay.gt(py) ^ by.gt(py)
+        var xcross = ax + (py - ay) * (bx - ax) / (by - ay)
+        var zeros = ax * 0.0
+        var ones = zeros + 1.0
+        crossings += Int(
+            (hits & xcross.gt(px)).select(ones, zeros).reduce_add()
+        )
+        i += C
+    while i < n:
         var j = i + 1
         if j == n:
             j = 0
@@ -70,8 +104,54 @@ def mpc_point_in_polygon(px: Float64, py: Float64, xy: Int, n: Int) abi("C") -> 
         if (ay > py) != (by > py):
             var xcross = ax + (py - ay) * (bx - ax) / (by - ay)
             if xcross > px:
-                inside = not inside
-    return 1 if inside else 0
+                crossings += 1
+        i += 1
+    return 1 if crossings % 2 else 0
+
+
+@export("mpc_is_convex")
+def mpc_is_convex(xy: Int, n: Int) abi("C") -> Int:
+    if n < 3 or xy == 0:
+        return 0
+    var p = Ptr(unsafe_from_address=xy)
+    comptime W = simd_width_of[DType.float64]()
+    comptime C = W // 2
+    var has_positive = False
+    var has_negative = False
+    var i = 1
+    while i + C < n:
+        var a = p.load[width=W, alignment=1](2 * i - 2).deinterleave()
+        var b = p.load[width=W, alignment=1](2 * i).deinterleave()
+        var c = p.load[width=W, alignment=1](2 * i + 2).deinterleave()
+        var cross = (b[0] - a[0]) * (c[1] - b[1]) - (b[1] - a[1]) * (c[0] - b[0])
+        has_positive = has_positive or cross.gt(1e-12).reduce_or()
+        has_negative = has_negative or cross.lt(-1e-12).reduce_or()
+        if has_positive and has_negative:
+            return 0
+        i += C
+    while i < n:
+        var prev = i - 1
+        var following = i + 1
+        if following == n:
+            following = 0
+        var ux = p[2 * i] - p[2 * prev]
+        var uy = p[2 * i + 1] - p[2 * prev + 1]
+        var vx = p[2 * following] - p[2 * i]
+        var vy = p[2 * following + 1] - p[2 * i + 1]
+        var cross = ux * vy - uy * vx
+        has_positive = has_positive or cross > 1e-12
+        has_negative = has_negative or cross < -1e-12
+        if has_positive and has_negative:
+            return 0
+        i += 1
+    var ux = p[0] - p[2 * n - 2]
+    var uy = p[1] - p[2 * n - 1]
+    var vx = p[2] - p[0]
+    var vy = p[3] - p[1]
+    var cross = ux * vy - uy * vx
+    has_positive = has_positive or cross > 1e-12
+    has_negative = has_negative or cross < -1e-12
+    return 1 if (has_positive != has_negative) else 0
 
 
 def line_intersection(ax: Float64, ay: Float64, bx: Float64, by: Float64,
@@ -142,14 +222,11 @@ def mpc_convex_intersection(a: Int, n: Int, b: Int, m: Int,
     return count
 
 
-@export("mpc_offset_miter")
-def mpc_offset_miter(xy: Int, n: Int, delta: Float64, dst_addr: Int) abi("C") -> Int:
-    if n < 3 or xy == 0 or dst_addr == 0:
-        return 0
-    var src = Ptr(unsafe_from_address=xy)
-    var dst = Ptr(unsafe_from_address=dst_addr)
-    var winding = signed_area(src, n)
-    for i in range(n):
+def offset_miter_range(
+    src: Ptr, dst: Ptr, n: Int, delta: Float64, sign: Float64,
+    start: Int, stop: Int
+):
+    for i in range(start, stop):
         var prev = i - 1
         if prev < 0:
             prev = n - 1
@@ -163,8 +240,9 @@ def mpc_offset_miter(xy: Int, n: Int, delta: Float64, dst_addr: Int) abi("C") ->
         var l1 = sqrt(e1x * e1x + e1y * e1y)
         var l2 = sqrt(e2x * e2x + e2y * e2y)
         if l1 <= 1e-18 or l2 <= 1e-18:
-            return 0
-        var sign = 1.0 if winding >= 0.0 else -1.0
+            dst[2 * i] = NAN
+            dst[2 * i + 1] = NAN
+            continue
         var n1x = sign * e1y / l1
         var n1y = -sign * e1x / l1
         var n2x = sign * e2y / l2
@@ -173,7 +251,36 @@ def mpc_offset_miter(xy: Int, n: Int, delta: Float64, dst_addr: Int) abi("C") ->
         var sy = n1y + n2y
         var denom = 1.0 + n1x * n2x + n1y * n2y
         if denom <= 1e-12:
-            return 0
+            dst[2 * i] = NAN
+            dst[2 * i + 1] = NAN
+            continue
         dst[2 * i] = src[2 * i] + delta * sx / denom
         dst[2 * i + 1] = src[2 * i + 1] + delta * sy / denom
+
+
+@export("mpc_offset_miter")
+def mpc_offset_miter(xy: Int, n: Int, delta: Float64, dst_addr: Int) abi("C") -> Int:
+    if n < 3 or xy == 0 or dst_addr == 0:
+        return 0
+    var src = Ptr(unsafe_from_address=xy)
+    var dst = Ptr(unsafe_from_address=dst_addr)
+    var winding = signed_area(src, n)
+    var sign = 1.0 if winding >= 0.0 else -1.0
+    if n >= OFFSET_PARALLEL_MIN:
+        comptime chunk_size = 8192
+        var chunks = (n + chunk_size - 1) // chunk_size
+
+        @parameter
+        def work(chunk: Int):
+            var start = chunk * chunk_size
+            offset_miter_range(
+                src, dst, n, delta, sign, start, min(start + chunk_size, n)
+            )
+
+        parallelize[work](chunks, min(chunks, num_physical_cores()))
+    else:
+        offset_miter_range(src, dst, n, delta, sign, 0, n)
+    for i in range(n):
+        if dst[2 * i] != dst[2 * i]:
+            return 0
     return n

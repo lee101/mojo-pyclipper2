@@ -173,6 +173,28 @@ def test_simd_area_and_scalar_tail_match_shoelace():
     assert pc.point_in_polygon((0, 0), path) == pc.PointInPolygonResult.IS_INSIDE
 
 
+@pytest.mark.parametrize("size", [3, 7, 13, 17])
+def test_simd_predicate_tails_and_boundary(size):
+    path = pc.make_path_double([
+        (math.cos(2 * math.pi * i / size), math.sin(2 * math.pi * i / size))
+        for i in range(size)
+    ])
+    assert pc.area(path) == pytest.approx(reference_area(coords(path)), abs=1e-12)
+    assert pc.point_in_polygon((0, 0), path) == pc.PointInPolygonResult.IS_INSIDE
+    assert pc.point_in_polygon(path[-1], path) == pc.PointInPolygonResult.IS_ON
+
+
+@pytest.mark.parametrize("size", [32767, 32768])
+def test_miter_offset_parallel_threshold(size):
+    angles = np.linspace(0, 2 * math.pi, size, endpoint=False)
+    path = np.column_stack((np.cos(angles), np.sin(angles)))
+    result = pc.inflate_paths(
+        [path], 0.01, pc.JoinType.MITER, pc.EndType.POLYGON
+    )[0]
+    assert len(result) == size
+    assert pc.area(result) > pc.area(path)
+
+
 def test_contiguous_float64_paths_stay_zero_copy():
     path = np.array([[0.0, 0.0], [4.0, 0.0], [0.0, 3.0]], dtype=np.float64)
     assert pc.area(path) == 6.0

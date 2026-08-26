@@ -16,6 +16,7 @@ F = ctypes.c_double
 _SIGNATURES = {
     "mpc_area": ([I, I], F),
     "mpc_point_in_polygon": ([F, F, I, I], I),
+    "mpc_is_convex": ([I, I], I),
     "mpc_convex_intersection": ([I, I, I, I, I, I, I], I),
     "mpc_offset_miter": ([I, I, F, I], I),
 }

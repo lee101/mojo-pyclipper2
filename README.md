@@ -56,27 +56,33 @@ assert [(p.x, p.y) for p in expanded[0]] == [(-2, -2), (12, -2), (12, 12), (-2, 
 
 ## Benchmarks
 
-Measured with `pixi run bench` on this Linux x86_64 machine on 2026-08-02.
+Measured with `pixi run bench` on this Linux x86_64 machine on 2026-08-26.
 Times are the best of repeated runs. The references are
 independent pure-Python implementations; these are not fabricated estimates.
 
 | kernel | mojo-pyclipper2 | pure Python | speedup | reference |
 | --- | ---: | ---: | ---: | --- |
-| signed area, 4,096 vertices | 3.554 ms | 0.537 ms | 0.15x | shoelace |
-| point in polygon, 4,096 vertices | 3.607 ms | 0.451 ms | 0.13x | ray crossing |
-| convex intersection, 4,096 + 4,096 | 158.623 ms | 6318.329 ms | 39.83x | Sutherland-Hodgman |
-| convex miter offset, 4,096 vertices | 20.608 ms | 20.608 ms | 1.00x | no independent fast reference |
+| signed area, 4,096 vertices | 1.014 ms | 0.579 ms | 0.57x | shoelace |
+| point in polygon, 4,096 vertices | 1.017 ms | 0.527 ms | 0.52x | ray crossing |
+| convex intersection, 4,096 + 4,096 | 132.176 ms | 6341.917 ms | 47.98x | Sutherland-Hodgman |
+| convex miter offset, 4,096 vertices | 6.814 ms | 6.814 ms | 1.00x | no independent fast reference |
 
-The scalar predicate calls are slower here because a Python list is marshalled
-into a NumPy buffer for each call. The native shoelace reduction and scratch
-copies use unaligned-safe SIMD with scalar tails; flattening point objects now
-uses a single-pass NumPy iterator. The high-work convex intersection kernel is
-39.83x faster than the direct Python reference. The offset row is reported
-honestly as a self-timing because no separate offset reference was benchmarked.
+The predicate calls still include marshalling a Python point list into a NumPy
+buffer for each call. Point objects are flattened by a single-pass NumPy
+iterator, while contiguous float64 NumPy inputs remain zero-copy. The native
+shoelace, point-in-polygon, convexity, and scratch-copy loops use unaligned-safe
+SIMD with scalar tails. Miter offsets stay serial below 32,768 vertices; larger
+paths are divided into independent 8,192-vertex CPU chunks with
+`max.algorithm.parallelize`. The high-work convex intersection kernel is 47.98x
+faster than the direct Python reference. The offset row is reported honestly as
+a self-timing because no separate offset reference was benchmarked.
 
-GPU execution is intentionally not included: the supported geometry kernels
-are branch-heavy or move more than two bytes per floating-point operation, so
-host-to-device transfer and launch costs lose to the CPU implementation.
+GPU execution is intentionally not included. Area and point-in-polygon are
+low-intensity streaming or branch-heavy kernels, and a miter vertex performs
+roughly 30 arithmetic operations while reading and writing at least 64 bytes.
+None reaches the roughly two-flops-per-byte threshold needed to justify device
+transfer and launch overhead, so no GPU code path was added. The `max`
+dependency supplies the CPU parallel primitive only.
 
 ## How it works
 
