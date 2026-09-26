@@ -1,13 +1,11 @@
 """C ABI for the convex polygon kernels used by the Python compatibility API."""
 
-from max.algorithm import parallelize
 from std.math import nan, sqrt
 from std.sys import simd_width_of
-from std.sys.info import num_physical_cores
 
 comptime Ptr = UnsafePointer[Float64, AnyOrigin[mut=True]]
 comptime NAN = nan[DType.float64]()
-comptime OFFSET_PARALLEL_MIN = 32768
+comptime OFFSET_CHUNK_MIN_VERTICES = 32768
 
 
 def signed_area(xy: Ptr, n: Int) -> Float64:
@@ -266,18 +264,14 @@ def mpc_offset_miter(xy: Int, n: Int, delta: Float64, dst_addr: Int) abi("C") ->
     var dst = Ptr(unsafe_from_address=dst_addr)
     var winding = signed_area(src, n)
     var sign = 1.0 if winding >= 0.0 else -1.0
-    if n >= OFFSET_PARALLEL_MIN:
+    if n >= OFFSET_CHUNK_MIN_VERTICES:
         comptime chunk_size = 8192
         var chunks = (n + chunk_size - 1) // chunk_size
-
-        @parameter
-        def work(chunk: Int):
+        for chunk in range(chunks):
             var start = chunk * chunk_size
             offset_miter_range(
                 src, dst, n, delta, sign, start, min(start + chunk_size, n)
             )
-
-        parallelize[work](chunks, min(chunks, num_physical_cores()))
     else:
         offset_miter_range(src, dst, n, delta, sign, 0, n)
     for i in range(n):

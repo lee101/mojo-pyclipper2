@@ -72,8 +72,11 @@ buffer for each call. Point objects are flattened by a single-pass NumPy
 iterator, while contiguous float64 NumPy inputs remain zero-copy. The native
 shoelace, point-in-polygon, convexity, and scratch-copy loops use unaligned-safe
 SIMD with scalar tails. Miter offsets stay serial below 32,768 vertices; larger
-paths are divided into independent 8,192-vertex CPU chunks with
-`max.algorithm.parallelize`. The high-work convex intersection kernel is 47.98x
+paths are divided into independent 8,192-vertex chunks that run serially on the
+calling thread. A miter vertex performs roughly 30 arithmetic operations while
+moving at least 64 bytes, about 0.5 flops per byte, well under the roughly
+two-flops-per-byte point where splitting the work across threads pays. The
+high-work convex intersection kernel is 47.98x
 faster than the direct Python reference. The offset row is reported honestly as
 a self-timing because no separate offset reference was benchmarked.
 
@@ -81,8 +84,7 @@ GPU execution is intentionally not included. Area and point-in-polygon are
 low-intensity streaming or branch-heavy kernels, and a miter vertex performs
 roughly 30 arithmetic operations while reading and writing at least 64 bytes.
 None reaches the roughly two-flops-per-byte threshold needed to justify device
-transfer and launch overhead, so no GPU code path was added. The `max`
-dependency supplies the CPU parallel primitive only.
+transfer and launch overhead, so no GPU code path was added.
 
 ## How it works
 
